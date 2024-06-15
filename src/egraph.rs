@@ -1240,6 +1240,107 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         true
     }
 
+    /// Inverse equality saturation
+    pub fn invert(&mut self, rewrite: &Rewrite<L, N>) {
+        let matches = rewrite.search(self);
+
+        if matches.is_empty() {
+            // TODO: If no matches should I return `Option::None`? Not sure how the API for this should work.
+            return;
+        }
+
+        dbg!(&matches);
+        dbg!(&self.nodes);
+
+        let searcher_pat = Pattern::from(
+            rewrite
+                .searcher
+                .get_pattern_ast()
+                .expect("Searcher (LHS) of rewrite rule should be a pattern")
+                .clone(),
+        );
+
+        // TODO: Feels hacky to have to reparse `Applier`, is there a better way?
+        let applier_pat = Pattern::from(
+            rewrite
+                .applier
+                .get_pattern_ast()
+                .expect("Applier (RHS) of rewrite rule should be a pattern")
+                .clone(),
+        );
+
+        // TODO: I'm kinda paranoid someone will sneak in a pattern that breaks the DAG invariant. Is this enforced by `Rewrite`?
+        debug_assert!(applier_pat.ast.is_dag());
+
+        let mut searcher_enode_ids: HashSet<Id> = HashSet::default();
+        let mut already_has_collision = false;
+
+        let applier_enode_ids: Vec<&Id> = matches
+            .into_iter()
+            .flat_map(
+                |SearchMatches {
+                     substs,
+                     eclass: _,
+                     ast: _,
+                 }| substs.into_iter(),
+            )
+            .filter_map(|subst| {
+                // TODO: The insane nesting is giving me the heebie-jeebies. Is there a better way to do this?
+                if let Some(applier_enode_id) = self.find_enode_id(applier_pat.ast.as_ref(), &subst)
+                {
+                    if !already_has_collision {
+                        if let Some(id) = self.find_enode_id(searcher_pat.ast.as_ref(), &subst) {
+                            searcher_enode_ids.insert(*id);
+                        }
+                        if searcher_enode_ids.contains(applier_enode_id) {
+                            already_has_collision = true;
+                            None
+                        } else {
+                            Some(applier_enode_id)
+                        }
+                    } else {
+                        Some(applier_enode_id)
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        dbg!(&applier_enode_ids);
+        for id in applier_enode_ids {
+            dbg!(self.id_to_expr(*id));
+        }
+    }
+
+    /// Find the e-node ID given a PatternAst and a substitution.
+    ///
+    /// # Example: TODO not actually done yet
+    /// ```
+    /// use egg::*;
+    /// let egraph = EGraph::<String, ()>::default();
+    /// let enode_id = egraph.find_enode_id(pattern_ast, subst);
+    /// let enode = egraph.id_to_node(enode_id);
+    /// ```
+    fn find_enode_id(&self, pattern: &[ENodeOrVar<L>], subst: &Subst) -> Option<&Id> {
+        let mut id_buf: Vec<Id> = vec![0.into(); pattern.len()];
+        let mut candidate: Option<&Id> = None;
+        for (i, enode_or_var) in pattern.iter().enumerate() {
+            let id = match enode_or_var {
+                ENodeOrVar::Var(var) => subst[*var],
+                ENodeOrVar::ENode(enode) => {
+                    let substituted_enode = enode
+                        .clone()
+                        .map_children(|child| id_buf[usize::from(child)]);
+                    candidate = self.memo.get(&substituted_enode);
+                    self.lookup(substituted_enode)?
+                }
+            };
+            id_buf[i] = id;
+        }
+        candidate
+    }
+
     /// Update the analysis data of an e-class.
     ///
     /// This also propagates the changes through the e-graph,
