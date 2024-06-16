@@ -47,6 +47,39 @@ impl UnionFind {
         *self.parent_mut(root2) = root1;
         root1
     }
+
+    /// TODO: Naive implementation, for a potentially more efficient one see
+    /// [this paper](https://dl.acm.org/doi/10.1145/2636922), but I think it
+    /// would triple the memory usage (and be hella more complicated)
+    ///
+    /// There's also [this cool paper](https://link.springer.com/article/10.1007/s10817-017-9431-7),
+    /// although I don't think it covers deletions
+    pub fn delete(&mut self, query: Id) {
+        let parent = self.parent(query);
+
+        self.parents.remove(usize::from(query));
+
+        let mut new_root: Option<Id> = None;
+        for idx in 0..self.parents.len() {
+            if parent == query {
+                // Deleted a root node so choose a new root for the children, if any
+                if self.parents[idx] == query {
+                    if new_root.is_none() {
+                        new_root = Some(Id::from(idx));
+                    }
+                    self.parents[idx] = new_root.unwrap();
+                }
+            } else {
+                // Deleting a non-root node
+                if self.parents[idx] == query {
+                    self.parents[idx] = parent;
+                }
+            }
+            if self.parents[idx] > query {
+                self.parents[idx] = Id::from(usize::from(self.parents[idx]) - 1);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -88,5 +121,32 @@ mod tests {
         // indexes:         0, 1, 2, 3, 4, 5, 6, 7, 8, 9
         let expected = vec![0, 0, 0, 0, 4, 5, 6, 6, 6, 6];
         assert_eq!(uf.parents, ids(expected));
+    }
+
+    #[test]
+    fn delete() {
+        let mut union_find = UnionFind::default();
+        for _ in 0..10 {
+            union_find.make_set();
+        }
+
+        union_find.union(Id::from(0), Id::from(1));
+        union_find.union(Id::from(0), Id::from(2));
+        union_find.union(Id::from(0), Id::from(3));
+
+        union_find.union(Id::from(6), Id::from(7));
+        union_find.union(Id::from(7), Id::from(8));
+        union_find.union(Id::from(8), Id::from(9));
+
+        assert_eq!(union_find.parents, ids(vec![0, 0, 0, 0, 4, 5, 6, 6, 7, 8]));
+
+        union_find.delete(Id::from(0));
+        assert_eq!(union_find.parents, ids(vec![0, 0, 0, 3, 4, 5, 5, 6, 7]));
+
+        union_find.delete(Id::from(4));
+        assert_eq!(union_find.parents, ids(vec![0, 0, 0, 3, 4, 4, 5, 6]));
+
+        union_find.delete(Id::from(4));
+        assert_eq!(union_find.parents, ids(vec![0, 0, 0, 3, 4, 4, 5]));
     }
 }
