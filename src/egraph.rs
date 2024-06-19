@@ -576,13 +576,17 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// assert_eq!(egraph.find(x), egraph.find(y));
     /// ```
     pub fn find(&self, id: Id) -> Id {
-        self.unionfind.find(id)
+        self.unionfind
+            .find(id)
+            .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
     }
 
     /// This is private, but internals should use this whenever
     /// possible because it does path compression.
     fn find_mut(&mut self, id: Id) -> Id {
-        self.unionfind.find_mut(id)
+        self.unionfind
+            .find_mut(id)
+            .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
     }
 
     /// Creates a [`Dot`] to visualize this egraph. See [`Dot`].
@@ -1241,16 +1245,15 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     }
 
     /// Inverse equality saturation
-    pub fn invert(&mut self, rewrite: &Rewrite<L, N>) {
+    ///
+    /// `roots` must be a list of canonical e-class IDs.
+    pub fn undo_rewrite(&mut self, rewrite: &Rewrite<L, N>, roots: Vec<Id>) {
         let matches = rewrite.search(self);
 
         if matches.is_empty() {
             // TODO: If no matches should I return `Option::None`? Not sure how the API for this should work.
             return;
         }
-
-        dbg!(&matches);
-        dbg!(&self.nodes);
 
         let searcher_pat = Pattern::from(
             rewrite
@@ -1275,7 +1278,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let mut searcher_enode_ids: HashSet<Id> = HashSet::default();
         let mut already_has_collision = false;
 
-        let applier_enode_ids: Vec<&Id> = matches
+        let applier_enode_ids: HashSet<Id> = matches
             .into_iter()
             .flat_map(
                 |SearchMatches {
@@ -1296,21 +1299,17 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                             already_has_collision = true;
                             None
                         } else {
-                            Some(applier_enode_id)
+                            Some(*applier_enode_id)
                         }
                     } else {
-                        Some(applier_enode_id)
+                        Some(*applier_enode_id)
                     }
                 } else {
                     None
                 }
             })
             .collect();
-
-        dbg!(&applier_enode_ids);
-        for id in applier_enode_ids {
-            dbg!(self.id_to_expr(*id));
-        }
+        self.remove_enodes(applier_enode_ids, roots);
     }
 
     /// Find the e-node ID given a PatternAst and a substitution.
@@ -1339,6 +1338,104 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             id_buf[i] = id;
         }
         candidate
+    }
+
+    /// Removes specified enodes and cleans up the resulting egraph, in particular by removing unreachable eclasses.
+    fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: Vec<Id>) {
+        // TODO: is this necesary
+        assert!(self.clean, "egraph must be clean before removing enodes");
+        self.clean = false;
+
+        let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
+        dbg!(&enode_ids);
+        dbg!(&roots);
+
+        let mut visited_eclasses = HashSet::<Id>::default();
+
+        // Remove the input enodes from their corresponding eclasses
+        for id in enode_ids {
+            let enode_to_remove = self.id_to_node(id).clone();
+            let eclass_id = &self.find_mut(id);
+            let eclass = self.classes.get_mut(eclass_id).unwrap();
+
+            // TODO: Is it faster to use `swap_remove`? Not sure if that's even
+            // possible because it would break binary search after the first
+            // `swap_remove`
+            eclass
+                .nodes
+                .remove(eclass.nodes.binary_search(&enode_to_remove).unwrap());
+            if !eclass.is_empty() {
+                visited_eclasses.insert(*eclass_id);
+            }
+
+            // Remove enode from parent arrays of children eclasses
+            for eclass_id in enode_to_remove.children() {
+                let eclass = self.classes.get_mut(eclass_id).unwrap();
+                eclass.parents.swap_remove(
+                    eclass
+                        .parents
+                        .iter()
+                        .position(|&parent_id| parent_id == id)
+                        .expect("enode should be in parents array of its children eclasses"),
+                );
+            }
+        }
+
+        let mut visited_enodes = HashSet::<L>::default();
+        let mut dfs_stack: Vec<&L> = roots
+            .iter()
+            .flat_map(|id| match self.classes.get(id) {
+                Some(eclass) => eclass.nodes.iter(),
+                None => [].iter(),
+            })
+            .collect();
+
+        // Traverse egraph from roots to leaves, marking visited eclasses and enodes
+        let mut counter = 0;
+        while let Some(enode) = dfs_stack.pop() {
+            let enode_id = *self.memo.get(enode).unwrap();
+            let eclass_id = self.find(enode_id);
+
+            visited_eclasses.insert(eclass_id);
+            visited_enodes.insert(enode.clone());
+
+            let children_enodes: Vec<&L> = enode
+                .children()
+                .iter()
+                // Avoid following cycles
+                .filter(|child| !visited_eclasses.contains(child))
+                .flat_map(|child| self.classes.get(child).unwrap().iter())
+                .collect();
+            dfs_stack.extend(children_enodes);
+
+            counter += 1;
+            if counter == 5 {
+                panic!();
+            }
+        }
+
+        // Remove unreachable enodes
+        self.memo.retain(|enode, _| visited_enodes.contains(enode));
+
+        // Remove unreachable eclasses
+        // TODO: Very ugly, maybe have `visited_eclasses` be a `HashMap<Id, bool>`?
+        let unreachable_eclasses = self
+            .classes
+            .keys()
+            .copied()
+            .collect::<HashSet<Id>>()
+            .difference(&visited_eclasses)
+            .copied()
+            .collect::<HashSet<Id>>();
+        for eclass_id in unreachable_eclasses {
+            self.unionfind.delete(eclass_id);
+            self.classes.remove(&eclass_id);
+            self.classes_by_op.values_mut().for_each(|op| {
+                op.remove(&eclass_id);
+            });
+        }
+
+        dbg!(self.dump());
     }
 
     /// Update the analysis data of an e-class.
@@ -1406,10 +1503,12 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         for class in self.classes.values_mut() {
             let old_len = class.len();
-            class
-                .nodes
-                .iter_mut()
-                .for_each(|n| n.update_children(|id| uf.find_mut(id)));
+            class.nodes.iter_mut().for_each(|n| {
+                n.update_children(|id| {
+                    uf.find_mut(id)
+                        .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
+                })
+            });
             class.nodes.sort_unstable();
             class.nodes.dedup();
 
