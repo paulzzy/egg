@@ -1363,8 +1363,12 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         candidate
     }
 
-    /// Removes specified enodes and cleans up the resulting egraph, in particular by removing unreachable eclasses.
+    /// Removes specified enodes and cleans up the resulting egraph, in
+    /// particular by removing unreachable eclasses and enodes.
     fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: Vec<Id>) {
+        if enode_ids.is_empty() {
+            return;
+        }
         // TODO: is this necesary
         assert!(self.clean, "egraph must be clean before removing enodes");
         self.clean = false;
