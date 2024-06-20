@@ -2,6 +2,7 @@ use crate::*;
 use std::{
     borrow::BorrowMut,
     fmt::{self, Debug, Display},
+    iter::{repeat, zip},
     marker::PhantomData,
 };
 
@@ -1246,73 +1247,95 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Inverse equality saturation
     ///
-    /// `roots` must be a list of canonical e-class IDs.
-    pub fn undo_rewrite(&mut self, rewrite: &Rewrite<L, N>, roots: Vec<Id>) {
-        let matches = rewrite.search(self);
+    /// `roots` can be non-canonical
+    ///
+    /// Note that "undoing" rewrites will not necessarily return the egraph to a
+    /// previous state. This method removes all but one equivalent
+    /// representation based on the rewrite rules to undo, but that equivalent
+    /// representation might not be the original one. It might even have more
+    /// terms.
+    ///
+    /// TODO: Above explanation might be confusing, write a better one.
+    pub fn undo_rewrites(
+        &mut self,
+        rewrites_to_undo: &[Rewrite<L, N>],
+        all_rewrites: &[Rewrite<L, N>],
+        roots: Vec<Id>,
+    ) {
+        // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
+        // without collecting `matches` in-between?
+        let patterns_and_matches: Vec<(Pattern<L>, Vec<SearchMatches<L>>)> = zip(
+            rewrites_to_undo.iter().map(|rewrite| {
+                Pattern::from(
+                    rewrite
+                        .applier
+                        .get_pattern_ast()
+                        .expect("Applier (RHS) of rewrite rule should be a pattern")
+                        .clone(),
+                )
+            }),
+            rewrites_to_undo.iter().map(|rewrite| rewrite.search(self)),
+        )
+        .collect();
 
-        if matches.is_empty() {
-            // TODO: If no matches should I return `Option::None`? Not sure how the API for this should work.
+        if patterns_and_matches.is_empty() {
+            // TODO: If no matches should I return `Option::None`? Not sure how
+            // the API for this should work.
             return;
         }
 
-        let searcher_pat = Pattern::from(
-            rewrite
-                .searcher
-                .get_pattern_ast()
-                .expect("Searcher (LHS) of rewrite rule should be a pattern")
-                .clone(),
-        );
-
-        // TODO: Feels hacky to have to reparse `Applier`, is there a better way?
-        let applier_pat = Pattern::from(
-            rewrite
-                .applier
-                .get_pattern_ast()
-                .expect("Applier (RHS) of rewrite rule should be a pattern")
-                .clone(),
-        );
-
-        // TODO: I'm kinda paranoid someone will sneak in a pattern that breaks the DAG invariant. Is this enforced by `Rewrite`?
-        debug_assert!(applier_pat.ast.is_dag());
-
-        let mut searcher_enode_ids: HashSet<Id> = HashSet::default();
-        let mut already_has_collision = false;
-
-        let applier_enode_ids: HashSet<Id> = matches
-            .into_iter()
-            .flat_map(
-                |SearchMatches {
-                     substs,
-                     eclass: _,
-                     ast: _,
-                 }| substs.into_iter(),
-            )
-            .filter_map(|subst| {
-                // TODO: The insane nesting is giving me the heebie-jeebies. Is there a better way to do this?
-                if let Some(applier_enode_id) = self.find_enode_id(applier_pat.ast.as_ref(), &subst)
-                {
-                    if !already_has_collision {
-                        if let Some(id) = self.find_enode_id(searcher_pat.ast.as_ref(), &subst) {
-                            searcher_enode_ids.insert(*id);
-                        }
-                        if searcher_enode_ids.contains(applier_enode_id) {
-                            already_has_collision = true;
-                            None
-                        } else {
-                            Some(*applier_enode_id)
-                        }
-                    } else {
-                        Some(*applier_enode_id)
-                    }
-                } else {
-                    None
-                }
+        // TODO: Feels hacky to have to reparse `Searcher` and `Applier`, is
+        // there a better way?
+        let mut maybe_colliding_searcher_patterns: Vec<Pattern<L>> = all_rewrites
+            .iter()
+            .map(|rewrite| {
+                Pattern::from(
+                    rewrite
+                        .searcher
+                        .get_pattern_ast()
+                        .expect("Searcher (LHS) of rewrite rule should be a pattern")
+                        .clone(),
+                )
             })
             .collect();
+
+        let applier_enode_ids: HashSet<Id> = patterns_and_matches
+            .into_iter()
+            .flat_map(|(applier_pat, all_search_matches)| {
+                zip(repeat(applier_pat), all_search_matches.into_iter())
+            })
+            .flat_map(|(applier_pat, search_matches)| {
+                zip(repeat(applier_pat), search_matches.substs.into_iter())
+            })
+            .filter_map(|(applier_pat, subst)| {
+                dbg!(&applier_pat.ast);
+                dbg!(&subst);
+                let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
+                dbg!(self.id_to_node(*applier_enode_id));
+
+                // Check for collisions with any searcher pattern. If any are
+                // found, do not mark the enode for removal. Since at most one
+                // instance of each searcher pattern must exist in the egraph,
+                // remove the colliding searcher pattern(s) as candidates for
+                // collision checking.
+                let before = maybe_colliding_searcher_patterns.len();
+                maybe_colliding_searcher_patterns.retain(|searcher_pat| {
+                    self.find_enode_id(searcher_pat.ast.as_ref(), &subst)
+                        .is_none()
+                });
+                if before > maybe_colliding_searcher_patterns.len() {
+                    dbg!(before - maybe_colliding_searcher_patterns.len());
+                    return None;
+                }
+
+                Some(*applier_enode_id)
+            })
+            .collect();
+
         self.remove_enodes(applier_enode_ids, roots);
     }
 
-    /// Find the e-node ID given a PatternAst and a substitution.
+    /// Find the e-node ID given a pattern and a substitution.
     ///
     /// # Example: TODO not actually done yet
     /// ```
@@ -1326,7 +1349,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let mut candidate: Option<&Id> = None;
         for (i, enode_or_var) in pattern.iter().enumerate() {
             let id = match enode_or_var {
-                ENodeOrVar::Var(var) => subst[*var],
+                ENodeOrVar::Var(var) => *subst.get(*var)?,
                 ENodeOrVar::ENode(enode) => {
                     let substituted_enode = enode
                         .clone()
@@ -1391,7 +1414,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             .collect();
 
         // Traverse egraph from roots to leaves, marking visited eclasses and enodes
-        let mut counter = 0;
         while let Some(enode) = dfs_stack.pop() {
             let enode_id = *self.memo.get(enode).unwrap();
             let eclass_id = self.find(enode_id);
@@ -1408,10 +1430,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 .collect();
             dfs_stack.extend(children_enodes);
 
-            counter += 1;
-            if counter == 5 {
-                panic!();
-            }
+            dbg!(&dfs_stack);
         }
 
         // Remove unreachable enodes
