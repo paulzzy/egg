@@ -1334,9 +1334,9 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// Find the e-node ID given a pattern and a substitution.
     ///
     /// # Example: TODO not actually done yet
-    /// ```
+    /// ```ignore
     /// use egg::*;
-    /// let egraph = EGraph::<String, ()>::default();
+    /// let egraph = EGraph::<SymbolLang, ()>::default();
     /// let enode_id = egraph.find_enode_id(pattern_ast, subst);
     /// let enode = egraph.id_to_node(enode_id);
     /// ```
