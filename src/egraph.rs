@@ -1258,8 +1258,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// TODO: Above explanation might be confusing, write a better one.
     pub fn undo_rewrites(
         &mut self,
-        rewrites_to_undo: &[Rewrite<L, N>],
-        all_rewrites: &[Rewrite<L, N>],
+        rewrites_to_undo: Vec<&Rewrite<L, N>>,
+        all_rewrites: Vec<&Rewrite<L, N>>,
         roots: Vec<Id>,
     ) {
         // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
@@ -1394,7 +1394,18 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             // `swap_remove`
             eclass
                 .nodes
-                .remove(eclass.nodes.binary_search(&enode_to_remove).unwrap());
+                .remove(match eclass.nodes.binary_search(&enode_to_remove) {
+                    Ok(idx) => idx,
+                    // TODO: I'm not sure why the Err path is ever taken, needs
+                    // investigation
+                    Err(_) => {
+                        println!(
+                            "enode to remove ({:?}) not found in eclass: {:?}",
+                            enode_to_remove, eclass
+                        );
+                        return;
+                    }
+                });
             if !eclass.is_empty() {
                 visited_eclasses.insert(*eclass_id);
             }
