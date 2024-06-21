@@ -1308,10 +1308,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 zip(repeat(applier_pat), search_matches.substs.into_iter())
             })
             .filter_map(|(applier_pat, subst)| {
-                dbg!(&applier_pat.ast);
-                dbg!(&subst);
                 let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
-                dbg!(self.id_to_node(*applier_enode_id));
 
                 // Check for collisions with any searcher pattern. If any are
                 // found, do not mark the enode for removal. Since at most one
@@ -1324,7 +1321,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                         .is_none()
                 });
                 if before > maybe_colliding_searcher_patterns.len() {
-                    dbg!(before - maybe_colliding_searcher_patterns.len());
                     return None;
                 }
 
@@ -1366,23 +1362,31 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// Removes specified enodes and cleans up the resulting egraph, in
     /// particular by removing unreachable eclasses and enodes.
     fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: Vec<Id>) {
+        // Pretty sure this is required since e.g. rebuilding dedups enodes in
+        // eclasses, `remove_enodes` can't handle duplicate enodes
+        // TODO: Better explanation
+        assert!(
+            self.clean,
+            "cannot remove enodes without a clean egraph, try rebuilding"
+        );
+
         if enode_ids.is_empty() {
             return;
         }
-        // TODO: is this necesary
-        assert!(self.clean, "egraph must be clean before removing enodes");
-        self.clean = false;
 
         let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
-        dbg!(&enode_ids);
-        dbg!(&roots);
 
         let mut visited_eclasses = HashSet::<Id>::default();
 
         // Remove the input enodes from their corresponding eclasses
-        for id in enode_ids {
-            let enode_to_remove = self.id_to_node(id).clone();
-            let eclass_id = &self.find_mut(id);
+        for enode_id in enode_ids {
+            // Canonicalize enode's children so it can be found in
+            // `eclass.nodes`
+            let enode_to_remove = self
+                .id_to_node(enode_id)
+                .clone()
+                .map_children(|child| self.find_mut(child));
+            let eclass_id = &self.find_mut(enode_id);
             let eclass = self.classes.get_mut(eclass_id).unwrap();
 
             // TODO: Is it faster to use `swap_remove`? Not sure if that's even
@@ -1402,7 +1406,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                     eclass
                         .parents
                         .iter()
-                        .position(|&parent_id| parent_id == id)
+                        .position(|&parent_id| parent_id == enode_id)
                         .expect("enode should be in parents array of its children eclasses"),
                 );
             }
@@ -1433,8 +1437,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 .flat_map(|child| self.classes.get(child).unwrap().iter())
                 .collect();
             dfs_stack.extend(children_enodes);
-
-            dbg!(&dfs_stack);
         }
 
         // Remove unreachable enodes
@@ -1457,8 +1459,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 op.remove(&eclass_id);
             });
         }
-
-        dbg!(self.dump());
     }
 
     /// Update the analysis data of an e-class.
