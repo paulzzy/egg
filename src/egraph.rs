@@ -1256,12 +1256,15 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// terms.
     ///
     /// TODO: Above explanation might be confusing, write a better one.
-    pub fn undo_rewrites(
-        &mut self,
-        rewrites_to_undo: Vec<&Rewrite<L, N>>,
-        all_rewrites: Vec<&Rewrite<L, N>>,
-        roots: Vec<Id>,
-    ) {
+    pub fn undo_rewrites<'a, R>(&mut self, rewrites_to_undo: R, all_rewrites: R, roots: Vec<Id>)
+    where
+        R: IntoIterator<Item = &'a Rewrite<L, N>>,
+        L: 'a,
+        N: 'a,
+    {
+        let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
+        let all_rewrites: Vec<_> = all_rewrites.into_iter().collect();
+
         // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
         // without collecting `matches` in-between?
         let patterns_and_matches: Vec<(Pattern<L>, Vec<SearchMatches<L>>)> = zip(
