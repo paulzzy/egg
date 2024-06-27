@@ -183,13 +183,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// This allows the egraph to explain why two expressions are
     /// equivalent with the [`explain_equivalence`](EGraph::explain_equivalence) function.
     pub fn with_explanations_enabled(mut self) -> Self {
-        if self.explain.is_some() {
-            return self;
-        }
-        if self.total_size() > 0 {
-            panic!("Need to set explanations enabled before adding any expressions to the egraph.");
-        }
-        self.explain = Some(Explain::new());
+        // if self.explain.is_some() {
+        //     return self;
+        // }
+        // if self.total_size() > 0 {
+        //     panic!("Need to set explanations enabled before adding any expressions to the egraph.");
+        // }
+        // self.explain = Some(Explain::new());
         self
     }
 
@@ -1453,6 +1453,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         // Remove unreachable enodes
         self.memo.retain(|enode, _| visited_enodes.contains(enode));
+        self.nodes.retain(|_, enode| visited_enodes.contains(enode));
 
         // Remove unreachable eclasses
         // TODO: Very ugly, maybe have `visited_eclasses` be a `HashMap<Id, bool>`?
