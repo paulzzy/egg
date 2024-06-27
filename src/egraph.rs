@@ -58,7 +58,7 @@ pub struct EGraph<L: Language, N: Analysis<L>> {
     pub(crate) explain: Option<Explain<L>>,
     unionfind: UnionFind,
     /// Stores the original node represented by each non-canonical id
-    nodes: Vec<L>,
+    nodes: HashMap<Id, L>,
     /// Stores each enode's `Id`, not the `Id` of the eclass.
     /// Enodes in the memo are canonicalized at each rebuild, but after rebuilding new
     /// unions can cause them to become out of date.
@@ -221,7 +221,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             panic!("Use runner.with_explanations_enabled() or egraph.with_explanations_enabled() before running to get a copied egraph without unions");
         }
         let mut egraph = Self::new(analysis);
-        for node in &self.nodes {
+        for (_, node) in &self.nodes {
             egraph.add(node.clone());
         }
         egraph
@@ -370,7 +370,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Like [`id_to_expr`](EGraph::id_to_expr) but only goes one layer deep
     pub fn id_to_node(&self, id: Id) -> &L {
-        &self.nodes[usize::from(id)]
+        self.nodes.get(&id).unwrap()
     }
 
     /// Like [`id_to_expr`](EGraph::id_to_expr), but creates a pattern instead of a term.
@@ -657,8 +657,8 @@ where
             nodes: src_egraph
                 .nodes
                 .into_iter()
-                .map(|x| self.map_node(x))
-                .collect(),
+                .map(|(id, enode)| (id, self.map_node(enode)))
+                .collect::<HashMap<_, _>>(),
             analysis_pending: src_egraph.analysis_pending,
             classes: src_egraph
                 .classes
@@ -1052,8 +1052,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 } else {
                     let new_id = self.unionfind.make_set();
                     explain.add(original.clone(), new_id, new_id);
-                    debug_assert_eq!(Id::from(self.nodes.len()), new_id);
-                    self.nodes.push(original);
+                    self.nodes.insert(new_id, original);
                     self.unionfind.union(id, new_id);
                     explain.union(existing_id, new_id, Justification::Congruence, true);
                     new_id
@@ -1085,8 +1084,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             parents: Default::default(),
         };
 
-        debug_assert_eq!(Id::from(self.nodes.len()), id);
-        self.nodes.push(original);
+        self.nodes.insert(id, enode.clone());
 
         // add this enode to the parent lists of its children
         enode.for_each(|child| {
@@ -1621,13 +1619,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let mut n_unions = 0;
 
         while !self.pending.is_empty() || !self.analysis_pending.is_empty() {
-            while let Some(class) = self.pending.pop() {
-                let mut node = self.nodes[usize::from(class)].clone();
+            while let Some(class_id) = self.pending.pop() {
+                let mut node = self.nodes.get(&class_id).unwrap().clone();
                 node.update_children(|id| self.find_mut(id));
-                if let Some(memo_class) = self.memo.insert(node, class) {
+                if let Some(memo_class) = self.memo.insert(node, class_id) {
                     let did_something = self.perform_union(
                         memo_class,
-                        class,
+                        class_id,
                         Some(Justification::Congruence),
                         false,
                     );
@@ -1636,7 +1634,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             }
 
             while let Some(class_id) = self.analysis_pending.pop() {
-                let node = self.nodes[usize::from(class_id)].clone();
+                let node = self.nodes.get(&class_id).unwrap().clone();
                 let class_id = self.find_mut(class_id);
                 let node_data = N::make(self, &node);
                 let class = self.classes.get_mut(&class_id).unwrap();

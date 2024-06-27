@@ -82,7 +82,7 @@ pub struct Explain<L: Language> {
 
 pub(crate) struct ExplainNodes<'a, L: Language> {
     explain: &'a mut Explain<L>,
-    nodes: &'a [L],
+    nodes: &'a HashMap<Id, L>,
 }
 
 #[derive(Default)]
@@ -1047,7 +1047,7 @@ impl<L: Language> Explain<L> {
         equalities
     }
 
-    pub(crate) fn with_nodes<'a>(&'a mut self, nodes: &'a [L]) -> ExplainNodes<'a, L> {
+    pub(crate) fn with_nodes<'a>(&'a mut self, nodes: &'a HashMap<Id, L>) -> ExplainNodes<'a, L> {
         ExplainNodes {
             explain: self,
             nodes,
@@ -1071,7 +1071,7 @@ impl<'a, L: Language> DerefMut for ExplainNodes<'a, L> {
 
 impl<'x, L: Language> ExplainNodes<'x, L> {
     pub(crate) fn node(&self, node_id: Id) -> &L {
-        &self.nodes[usize::from(node_id)]
+        self.nodes.get(&node_id).unwrap()
     }
     fn node_to_explanation(
         &self,
