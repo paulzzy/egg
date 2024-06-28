@@ -422,6 +422,9 @@ where
                 self.stop_reason = Some(stop_reason);
                 break;
             }
+
+            self.egraph
+                .undo_rewrites(rules.clone(), rules.clone(), self.roots.clone());
         }
 
         assert!(!self.iterations.is_empty());
