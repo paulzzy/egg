@@ -1407,9 +1407,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                         return;
                     }
                 });
-            if !eclass.is_empty() {
-                visited_eclasses.insert(*eclass_id);
-            }
 
             // Remove enode from parent arrays of children eclasses
             for eclass_id in enode_to_remove.children() {
