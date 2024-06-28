@@ -1262,6 +1262,11 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     {
         let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
         let all_rewrites: Vec<_> = all_rewrites.into_iter().collect();
+        info!(
+            "Undoing {} rewrites out of {} total",
+            rewrites_to_undo.len(),
+            all_rewrites.len()
+        );
 
         // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
         // without collecting `matches` in-between?
@@ -1375,6 +1380,9 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             return;
         }
 
+        let num_enodes = self.nodes.len();
+        let num_eclasses = self.classes.len();
+
         let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
 
         let mut visited_eclasses = HashSet::<Id>::default();
@@ -1400,7 +1408,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                     // TODO: I'm not sure why the Err path is ever taken, needs
                     // investigation
                     Err(_) => {
-                        println!(
+                        warn!(
                             "enode to remove ({:?}) not found in eclass: {:?}",
                             enode_to_remove, eclass
                         );
@@ -1469,6 +1477,23 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 op.remove(&eclass_id);
             });
         }
+
+        // Validate remaining enodes' children
+        #[cfg(debug_assertions)]
+        {
+            for (_, enode) in self.nodes.iter() {
+                dbg!(enode);
+                for child in enode.children() {
+                    self.find(*child);
+                }
+            }
+        }
+
+        info!(
+            "Removed {} enodes and {} eclasses",
+            num_enodes - self.nodes.len(),
+            num_eclasses - self.classes.len()
+        );
     }
 
     /// Update the analysis data of an e-class.
