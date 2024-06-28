@@ -40,6 +40,7 @@ fn simplify(s: &str) -> String {
 
 #[test]
 fn simple_tests() {
+    let _ = env_logger::builder().is_test(true).try_init();
     assert_eq!(simplify("(* 0 42)"), "0");
     assert_eq!(simplify("(+ 0 (* 1 foo))"), "foo");
 }
