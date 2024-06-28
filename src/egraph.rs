@@ -1262,10 +1262,18 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     {
         let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
         let all_rewrites: Vec<_> = all_rewrites.into_iter().collect();
+
         info!(
             "Undoing {} rewrites out of {} total",
             rewrites_to_undo.len(),
             all_rewrites.len()
+        );
+        debug!(
+            "Rewrites to undo: {:?}",
+            rewrites_to_undo
+                .iter()
+                .map(|rewrite| rewrite.name)
+                .collect::<Vec<_>>()
         );
 
         // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
@@ -1380,6 +1388,15 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             return;
         }
 
+        debug!(
+            "Removing specified enodes: {:?}",
+            enode_ids
+                .iter()
+                .map(|id| self.id_to_node(*id))
+                .collect::<Vec<_>>()
+        );
+        trace!("EGraph before removing enodes:\n{:?}", self.dump());
+
         let num_enodes = self.nodes.len();
         let num_eclasses = self.classes.len();
 
@@ -1398,9 +1415,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             let eclass_id = &self.find_mut(enode_id);
             let eclass = self.classes.get_mut(eclass_id).unwrap();
 
-            // TODO: Is it faster to use `swap_remove`? Not sure if that's even
-            // possible because it would break binary search after the first
-            // `swap_remove`
             eclass
                 .nodes
                 .remove(match eclass.nodes.binary_search(&enode_to_remove) {
@@ -1478,11 +1492,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             });
         }
 
-        // Validate remaining enodes' children
+        trace!("EGraph after removing enodes:\n{:?}", self.dump());
+
+        // Validate children of remaining enodes
         #[cfg(debug_assertions)]
         {
             for (_, enode) in self.nodes.iter() {
-                dbg!(enode);
+                debug!("Validating children of remaining enode {:?}", enode);
                 for child in enode.children() {
                     self.find(*child);
                 }
@@ -1490,9 +1506,11 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
 
         info!(
-            "Removed {} enodes and {} eclasses",
+            "Removed {} enodes ({} remaining) and {} eclasses ({} remaining)",
             num_enodes - self.nodes.len(),
-            num_eclasses - self.classes.len()
+            self.nodes.len(),
+            num_eclasses - self.classes.len(),
+            self.classes.len()
         );
     }
 
