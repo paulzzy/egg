@@ -1355,17 +1355,25 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// let enode = egraph.id_to_node(enode_id);
     /// ```
     fn find_enode_id(&self, pattern: &[ENodeOrVar<L>], subst: &Subst) -> Option<&Id> {
+        // Pretty sure this is required since finding an instantiated enode
+        // relies on the egraph's enodes having canonicalized children
+        // TODO: Better explanation
+        assert!(
+            self.clean,
+            "Cannot remove enodes without a clean egraph, try rebuilding"
+        );
+
         let mut id_buf: Vec<Id> = vec![0.into(); pattern.len()];
         let mut candidate: Option<&Id> = None;
         for (i, enode_or_var) in pattern.iter().enumerate() {
             let id = match enode_or_var {
                 ENodeOrVar::Var(var) => *subst.get(*var)?,
                 ENodeOrVar::ENode(enode) => {
-                    let substituted_enode = enode
+                    let instantiated_enode = enode
                         .clone()
                         .map_children(|child| id_buf[usize::from(child)]);
-                    candidate = self.memo.get(&substituted_enode);
-                    self.lookup(substituted_enode)?
+                    candidate = self.memo.get(&instantiated_enode);
+                    self.lookup(instantiated_enode)?
                 }
             };
             id_buf[i] = id;
