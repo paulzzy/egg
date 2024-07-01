@@ -1313,7 +1313,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             })
             .collect();
 
-        let applier_enode_ids: HashSet<Id> = patterns_and_matches
+        let mut applier_enode_ids: HashSet<Id> = patterns_and_matches
             .into_iter()
             .flat_map(|(applier_pat, all_search_matches)| {
                 zip(repeat(applier_pat), all_search_matches.into_iter())
@@ -1381,8 +1381,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         candidate
     }
 
-    /// Removes specified enodes and cleans up the resulting egraph, in
-    /// particular by removing unreachable eclasses and enodes.
+    /// Removes specified enodes (except when it would leave dangling children)
+    /// and cleans up the resulting egraph, in particular by removing
+    /// unreachable eclasses and enodes.
+    ///
+    /// For an enode that has parents (which aren't being removed) and is the
+    /// only member of its eclass, removing it when leave a dangling child. In
+    /// this case, the enode is not removed.
     fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: Vec<Id>) {
         // Pretty sure this is required since e.g. rebuilding dedups enodes in
         // eclasses, `remove_enodes` can't handle duplicate enodes
@@ -1413,16 +1418,32 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let mut visited_eclasses = HashSet::<Id>::default();
 
         // Remove the input enodes from their corresponding eclasses
-        for enode_id in enode_ids {
+        'enode_removal: for enode_id in &enode_ids {
             // Canonicalize enode's children so it can be found in
             // `eclass.nodes`
             let enode_to_remove = self
-                .id_to_node(enode_id)
+                .id_to_node(*enode_id)
                 .clone()
                 .map_children(|child| self.find_mut(child));
-            let eclass_id = &self.find_mut(enode_id);
-            let eclass = self.classes.get_mut(eclass_id).unwrap();
+            let eclass_id = &self.find_mut(*enode_id);
 
+            let eclass = self.classes.get(eclass_id).unwrap();
+            if eclass.nodes.len() == 1 && !eclass.parents.is_empty() {
+                for parent_id in &eclass.parents {
+                    // Ancestor of enode is not specified for removal, so don't
+                    // remove enode to avoid a dangling child
+                    if !enode_ids.contains(parent_id) {
+                        info!(
+                            "Skipping removal of {:?}, which would become a dangling child",
+                            &enode_to_remove
+                        );
+                        continue 'enode_removal;
+                    }
+                }
+            }
+
+            // TODO: Shadowing shenanigans to avoid angering the borrow checker
+            let eclass = self.classes.get_mut(eclass_id).unwrap();
             eclass
                 .nodes
                 .remove(match eclass.nodes.binary_search(&enode_to_remove) {
@@ -1445,7 +1466,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                     eclass
                         .parents
                         .iter()
-                        .position(|&parent_id| parent_id == enode_id)
+                        .position(|parent_id| parent_id == enode_id)
                         .expect("enode should be in parents array of its children eclasses"),
                 );
             }
