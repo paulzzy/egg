@@ -1391,7 +1391,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
 
         debug!(
-            "Removing specified enodes: {:?}",
+            "Enodes specified for removal (children may be uncanonical): {:?}",
             enode_ids
                 .iter()
                 .map(|id| self.id_to_node(*id))
@@ -1435,18 +1435,17 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             let eclass = self.classes.get_mut(eclass_id).unwrap();
             eclass
                 .nodes
-                .remove(match eclass.nodes.binary_search(&enode_to_remove) {
-                    Ok(idx) => idx,
-                    // TODO: I'm not sure why the Err path is ever taken, needs
-                    // investigation
-                    Err(_) => {
-                        warn!(
-                            "enode to remove ({:?}) not found in eclass: {:?}",
-                            enode_to_remove, eclass
-                        );
-                        return;
-                    }
-                });
+                .remove(
+                    eclass
+                        .nodes
+                        .binary_search(&enode_to_remove)
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "Enode to remove ({:?}) not found in eclass: {:?}\nMost likely the result of external code removing enodes from the egraph",
+                                enode_to_remove, eclass
+                            )
+                        }),
+                );
 
             // Remove enode from parent arrays of children eclasses
             for eclass_id in enode_to_remove.children() {
@@ -1459,6 +1458,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                         .expect("enode should be in parents array of its children eclasses"),
                 );
             }
+
+            debug!("Removed {:?}", self.id_to_node(*enode_id));
         }
 
         let mut visited_enodes = HashSet::<L>::default();
