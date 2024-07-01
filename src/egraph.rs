@@ -136,6 +136,14 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.classes.values_mut()
     }
 
+    /// Returns an iterator over (enode, non-canonical ID) entries in the egraph.
+    ///
+    /// TODO: Better docs or find a cleaner way to store the original egraph
+    /// (before rewriting occurs).
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (&Id, &L)> {
+        self.nodes.iter()
+    }
+
     /// Returns `true` if the egraph is empty
     /// # Example
     /// ```
@@ -1254,8 +1262,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// terms.
     ///
     /// TODO: Above explanation might be confusing, write a better one.
-    pub fn undo_rewrites<'a, R>(&mut self, rewrites_to_undo: R, all_rewrites: R, roots: Vec<Id>)
-    where
+    pub fn undo_rewrites<'a, R>(
+        &mut self,
+        rewrites_to_undo: R,
+        all_rewrites: R,
+        roots: &[Id],
+        original_enode_ids: &HashSet<Id>,
+    ) where
         R: IntoIterator<Item = &'a Rewrite<L, N>>,
         L: 'a,
         N: 'a,
@@ -1298,22 +1311,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             return;
         }
 
-        // TODO: Feels hacky to have to reparse `Searcher` and `Applier`, is
-        // there a better way?
-        let mut maybe_colliding_searcher_patterns: Vec<Pattern<L>> = all_rewrites
-            .iter()
-            .map(|rewrite| {
-                Pattern::from(
-                    rewrite
-                        .searcher
-                        .get_pattern_ast()
-                        .expect("Searcher (LHS) of rewrite rule should be a pattern")
-                        .clone(),
-                )
-            })
-            .collect();
-
-        let mut applier_enode_ids: HashSet<Id> = patterns_and_matches
+        let applier_enode_ids: HashSet<Id> = patterns_and_matches
             .into_iter()
             .flat_map(|(applier_pat, all_search_matches)| {
                 zip(repeat(applier_pat), all_search_matches.into_iter())
@@ -1324,17 +1322,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             .filter_map(|(applier_pat, subst)| {
                 let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
 
-                // Check for collisions with any searcher pattern. If any are
-                // found, do not mark the enode for removal. Since at most one
-                // instance of each searcher pattern must exist in the egraph,
-                // remove the colliding searcher pattern(s) as candidates for
-                // collision checking.
-                let before = maybe_colliding_searcher_patterns.len();
-                maybe_colliding_searcher_patterns.retain(|searcher_pat| {
-                    self.find_enode_id(searcher_pat.ast.as_ref(), &subst)
-                        .is_none()
-                });
-                if before > maybe_colliding_searcher_patterns.len() {
+                // Always preserve the original enodes
+                if original_enode_ids.contains(applier_enode_id) {
                     return None;
                 }
 
@@ -1388,7 +1377,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// For an enode that has parents (which aren't being removed) and is the
     /// only member of its eclass, removing it when leave a dangling child. In
     /// this case, the enode is not removed.
-    fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: Vec<Id>) {
+    fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: &[Id]) {
         // Pretty sure this is required since e.g. rebuilding dedups enodes in
         // eclasses, `remove_enodes` can't handle duplicate enodes
         // TODO: Better explanation
@@ -1430,7 +1419,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             let eclass = self.classes.get(eclass_id).unwrap();
             if eclass.nodes.len() == 1 && !eclass.parents.is_empty() {
                 for parent_id in &eclass.parents {
-                    // Ancestor of enode is not specified for removal, so don't
+                    // Parent of enode is not specified for removal, so don't
                     // remove enode to avoid a dangling child
                     if !enode_ids.contains(parent_id) {
                         info!(
