@@ -412,6 +412,13 @@ where
         let rules: Vec<&Rewrite<L, N>> = rules.into_iter().collect();
         check_rules(&rules);
         self.egraph.rebuild();
+
+        let original_enodes = self
+            .egraph
+            .nodes()
+            .map(|(id, _)| *id)
+            .collect::<HashSet<Id>>();
+
         loop {
             let iter = self.run_one(&rules);
             self.iterations.push(iter);
@@ -422,10 +429,10 @@ where
                 self.stop_reason = Some(stop_reason);
                 break;
             }
-
-            self.egraph
-                .undo_rewrites(rules.clone(), rules.clone(), self.roots.clone());
         }
+
+        self.egraph
+            .undo_rewrites(rules.clone(), rules.clone(), &self.roots, &original_enodes);
 
         assert!(!self.iterations.is_empty());
         assert!(self.stop_reason.is_some());
