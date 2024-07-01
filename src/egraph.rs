@@ -1265,22 +1265,16 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     pub fn undo_rewrites<'a, R>(
         &mut self,
         rewrites_to_undo: R,
-        all_rewrites: R,
         roots: &[Id],
-        original_enode_ids: &HashSet<Id>,
+        original_enodes: &HashSet<L>,
     ) where
         R: IntoIterator<Item = &'a Rewrite<L, N>>,
         L: 'a,
         N: 'a,
     {
         let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
-        let all_rewrites: Vec<_> = all_rewrites.into_iter().collect();
 
-        info!(
-            "Undoing {} rewrites out of {} total",
-            rewrites_to_undo.len(),
-            all_rewrites.len()
-        );
+        info!("Undoing {} rewrites", rewrites_to_undo.len(),);
         debug!(
             "Rewrites to undo: {:?}",
             rewrites_to_undo
@@ -1322,8 +1316,22 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             .filter_map(|(applier_pat, subst)| {
                 let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
 
-                // Always preserve the original enodes
-                if original_enode_ids.contains(applier_enode_id) {
+                let canonicalized_enode = self
+                    .id_to_node(*applier_enode_id)
+                    .clone()
+                    .map_children(|child| self.find(child));
+
+                // Always preserve the original enodes. Does not compare by ID
+                // since an enode may have multiple IDs (at least in
+                // `self.nodes`).
+                //
+                // TODO: Is there a way to use IDs? Or a way this would have
+                // false negatives?
+                if original_enodes.contains(&canonicalized_enode) {
+                    debug!(
+                        "Skip marking {:?} for removal since it's in the original egraph",
+                        canonicalized_enode
+                    );
                     return None;
                 }
 
@@ -1391,7 +1399,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
 
         debug!(
-            "Enodes specified for removal (children may be uncanonical): {:?}",
+            "Enodes which may be removed (with uncanonical children): {:?}",
             enode_ids
                 .iter()
                 .map(|id| self.id_to_node(*id))
@@ -1416,6 +1424,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 .map_children(|child| self.find_mut(child));
             let eclass_id = &self.find_mut(*enode_id);
 
+            // Skip if removing enode would leave a dangling child
             let eclass = self.classes.get(eclass_id).unwrap();
             if eclass.nodes.len() == 1 && !eclass.parents.is_empty() {
                 for parent_id in &eclass.parents {
@@ -1423,7 +1432,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                     // remove enode to avoid a dangling child
                     if !enode_ids.contains(parent_id) {
                         info!(
-                            "Skipping removal of {:?}, which would become a dangling child",
+                            "Skipping removal of {:?} to avoid becoming a dangling child",
                             &enode_to_remove
                         );
                         continue 'enode_removal;
@@ -1458,8 +1467,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                         .expect("enode should be in parents array of its children eclasses"),
                 );
             }
-
-            debug!("Removed {:?}", self.id_to_node(*enode_id));
         }
 
         let mut visited_enodes = HashSet::<L>::default();
