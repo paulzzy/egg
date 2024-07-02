@@ -16,3 +16,6 @@ perf.data*
 *.bench
 .vscode/settings.json
 out.csv
+
+# macOS
+.DS_Store
