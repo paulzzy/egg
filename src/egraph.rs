@@ -191,13 +191,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// This allows the egraph to explain why two expressions are
     /// equivalent with the [`explain_equivalence`](EGraph::explain_equivalence) function.
     pub fn with_explanations_enabled(mut self) -> Self {
-        // if self.explain.is_some() {
-        //     return self;
-        // }
-        // if self.total_size() > 0 {
-        //     panic!("Need to set explanations enabled before adding any expressions to the egraph.");
-        // }
-        // self.explain = Some(Explain::new());
+        if self.explain.is_some() {
+            return self;
+        }
+        if self.total_size() > 0 {
+            panic!("Need to set explanations enabled before adding any expressions to the egraph.");
+        }
+        self.explain = Some(Explain::new());
         self
     }
 
@@ -1251,17 +1251,10 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         true
     }
 
-    /// Inverse equality saturation
+    /// Inverse equality saturation.
     ///
-    /// `roots` can be non-canonical
-    ///
-    /// Note that "undoing" rewrites will not necessarily return the egraph to a
-    /// previous state. This method removes all but one equivalent
-    /// representation based on the rewrite rules to undo, but that equivalent
-    /// representation might not be the original one. It might even have more
-    /// terms.
-    ///
-    /// TODO: Above explanation might be confusing, write a better one.
+    /// Removes RHS instances of the input rewrites, but will not remove enodes
+    /// belonging to the original egraph (before rewriting).
     pub fn undo_rewrites<'a, R>(
         &mut self,
         rewrites_to_undo: R,
@@ -1283,8 +1276,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 .collect::<Vec<_>>()
         );
 
-        // TODO: Maybe optimize by iterating and collecting `applier_enode_ids`
-        // without collecting `matches` in-between?
         let patterns_and_matches: Vec<(Pattern<L>, Vec<SearchMatches<L>>)> = zip(
             rewrites_to_undo.iter().map(|rewrite| {
                 Pattern::from(
@@ -1410,10 +1401,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let num_enodes = self.nodes.len();
         let num_eclasses = self.classes.len();
 
-        let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
-
-        let mut visited_eclasses = HashSet::<Id>::default();
-
         // Remove the input enodes from their corresponding eclasses
         'enode_removal: for enode_id in &enode_ids {
             // Canonicalize enode's children so it can be found in
@@ -1469,7 +1456,24 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             }
         }
 
+        self.remove_unreachable(roots);
+
+        info!(
+            "Removed {} enodes ({} remaining) and {} eclasses ({} remaining)",
+            num_enodes - self.nodes.len(),
+            self.nodes.len(),
+            num_eclasses - self.classes.len(),
+            self.classes.len()
+        );
+    }
+
+    fn remove_unreachable(&mut self, roots: &[Id]) {
+        // Canonicalize roots' children
+        let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
+
+        let mut visited_eclasses = HashSet::<Id>::default();
         let mut visited_enodes = HashSet::<L>::default();
+
         let mut dfs_stack: Vec<&L> = roots
             .iter()
             .flat_map(|id| match self.classes.get(id) {
@@ -1501,7 +1505,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.nodes.retain(|_, enode| visited_enodes.contains(enode));
 
         // Remove unreachable eclasses
-        // TODO: Very ugly, maybe have `visited_eclasses` be a `HashMap<Id, bool>`?
+        // TODO: Verbose and possibly slow, maybe have `visited_eclasses` be a `HashMap<Id, bool>`?
         let unreachable_eclasses = self
             .classes
             .keys()
@@ -1520,7 +1524,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         trace!("EGraph after removing enodes:\n{:?}", self.dump());
 
-        // Validate children of remaining enodes
+        // Check for existence of remaining enodes' children
         #[cfg(debug_assertions)]
         {
             for (_, enode) in self.nodes.iter() {
@@ -1530,14 +1534,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 }
             }
         }
-
-        info!(
-            "Removed {} enodes ({} remaining) and {} eclasses ({} remaining)",
-            num_enodes - self.nodes.len(),
-            self.nodes.len(),
-            num_eclasses - self.classes.len(),
-            self.classes.len()
-        );
     }
 
     /// Update the analysis data of an e-class.
