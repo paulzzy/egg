@@ -415,9 +415,9 @@ where
 
         let original_enodes = self
             .egraph
-            .nodes()
-            .map(|(id, _)| *id)
-            .collect::<HashSet<Id>>();
+            .classes()
+            .flat_map(|eclass| eclass.nodes.clone())
+            .collect::<HashSet<_>>();
 
         loop {
             let iter = self.run_one(&rules);
@@ -429,10 +429,9 @@ where
                 self.stop_reason = Some(stop_reason);
                 break;
             }
+            self.egraph
+                .undo_rewrites(rules.clone(), &self.roots, &original_enodes);
         }
-
-        self.egraph
-            .undo_rewrites(rules.clone(), rules.clone(), &self.roots, &original_enodes);
 
         assert!(!self.iterations.is_empty());
         assert!(self.stop_reason.is_some());
