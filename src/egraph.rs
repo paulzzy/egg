@@ -136,14 +136,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.classes.values_mut()
     }
 
-    /// Returns an iterator over (enode, non-canonical ID) entries in the egraph.
-    ///
-    /// TODO: Better docs or find a cleaner way to store the original egraph
-    /// (before rewriting occurs).
-    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (&Id, &L)> {
-        self.nodes.iter()
-    }
-
     /// Returns `true` if the egraph is empty
     /// # Example
     /// ```
@@ -1255,6 +1247,8 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     ///
     /// Removes RHS instances of the input rewrites, but will not remove enodes
     /// belonging to the original egraph (before rewriting).
+    ///
+    /// TODO: Example
     pub fn undo_rewrites<'a, R>(
         &mut self,
         rewrites_to_undo: R,
