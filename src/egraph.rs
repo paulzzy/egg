@@ -183,6 +183,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// This allows the egraph to explain why two expressions are
     /// equivalent with the [`explain_equivalence`](EGraph::explain_equivalence) function.
     pub fn with_explanations_enabled(mut self) -> Self {
+        return self;
         if self.explain.is_some() {
             return self;
         }
@@ -1293,10 +1294,10 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let applier_enode_ids: HashSet<Id> = patterns_and_matches
             .into_iter()
             .flat_map(|(applier_pat, all_search_matches)| {
-                zip(repeat(applier_pat), all_search_matches.into_iter())
+                zip(repeat(applier_pat), all_search_matches)
             })
             .flat_map(|(applier_pat, search_matches)| {
-                zip(repeat(applier_pat), search_matches.substs.into_iter())
+                zip(repeat(applier_pat), search_matches.substs)
             })
             .filter_map(|(applier_pat, subst)| {
                 let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
@@ -1405,21 +1406,23 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 .map_children(|child| self.find_mut(child));
             let eclass_id = &self.find_mut(*enode_id);
 
-            // Skip if removing enode would leave a dangling child
+            // Skip if eclass is a singleton and has parents
+            //
+            // TODO: Might be skipping removals that are valid?
             let eclass = self.classes.get(eclass_id).unwrap();
             if eclass.nodes.len() == 1 && !eclass.parents.is_empty() {
-                for parent_id in &eclass.parents {
-                    // Parent of enode is not specified for removal, so don't
-                    // remove enode to avoid a dangling child
-                    if !enode_ids.contains(parent_id) {
-                        info!(
-                            "Skipping removal of {:?} to avoid becoming a dangling child",
-                            &enode_to_remove
-                        );
-                        continue 'enode_removal;
-                    }
-                }
+                info!(
+                    "Skipping removal of {:?} to avoid becoming a dangling child",
+                    &enode_to_remove
+                );
+                continue 'enode_removal;
             }
+
+            trace!(
+                "Removing enode {:?} with id {:?}",
+                self.id_to_node(*enode_id),
+                enode_id
+            );
 
             // TODO: Shadowing shenanigans to avoid angering the borrow checker
             let eclass = self.classes.get_mut(eclass_id).unwrap();
@@ -1466,7 +1469,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
 
         let mut visited_eclasses = HashSet::<Id>::default();
-        let mut visited_enodes = HashSet::<L>::default();
+        let mut visited_enodes = HashSet::<Id>::default();
 
         let mut dfs_stack: Vec<&L> = roots
             .iter()
@@ -1482,7 +1485,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             let eclass_id = self.find(enode_id);
 
             visited_eclasses.insert(eclass_id);
-            visited_enodes.insert(enode.clone());
+            visited_enodes.insert(enode_id);
 
             let children_enodes: Vec<&L> = enode
                 .children()
@@ -1495,36 +1498,50 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         }
 
         // Remove unreachable enodes
-        self.memo.retain(|enode, _| visited_enodes.contains(enode));
-        self.nodes.retain(|_, enode| visited_enodes.contains(enode));
+        self.memo
+            .retain(|_, enode_id| visited_enodes.contains(enode_id));
+        self.nodes
+            .retain(|enode_id, _| visited_enodes.contains(enode_id));
 
-        // Remove unreachable eclasses
-        // TODO: Verbose and possibly slow, maybe have `visited_eclasses` be a `HashMap<Id, bool>`?
-        let unreachable_eclasses = self
-            .classes
-            .keys()
-            .copied()
-            .collect::<HashSet<Id>>()
-            .difference(&visited_eclasses)
-            .copied()
-            .collect::<HashSet<Id>>();
-        for eclass_id in unreachable_eclasses {
-            self.unionfind.delete(eclass_id);
-            self.classes.remove(&eclass_id);
-            self.classes_by_op.values_mut().for_each(|op| {
-                op.remove(&eclass_id);
-            });
+        // Clean up eclasses
+        for eclass_id in self.classes.keys().copied().collect::<Vec<_>>() {
+            if visited_eclasses.contains(&eclass_id) {
+                // Remove unreachable parents
+                let eclass = self.classes.get_mut(&eclass_id).unwrap();
+                eclass
+                    .parents
+                    .retain(|parent_id| visited_enodes.contains(parent_id));
+            } else {
+                // Remove unreachable eclasses
+                self.unionfind.delete(eclass_id);
+                self.classes.remove(&eclass_id);
+                self.classes_by_op.values_mut().for_each(|op| {
+                    op.remove(&eclass_id);
+                });
+            }
         }
 
         trace!("EGraph after removing enodes:\n{:?}", self.dump());
 
-        // Check for existence of remaining enodes' children
         #[cfg(debug_assertions)]
         {
-            for (_, enode) in self.nodes.iter() {
-                debug!("Validating children of remaining enode {:?}", enode);
+            // Check for existence of remaining enodes' children
+            for (enode_id, enode) in self.nodes.iter() {
+                debug!(
+                    "Validating children of remaining enode {:?} with id {:?}",
+                    enode, enode_id
+                );
                 for child in enode.children() {
+                    trace!("Looking for child {:?}", child);
                     self.find(*child);
+                }
+            }
+
+            // Check for existence of remaining eclasses' parents
+            for (eclass_id, eclass) in self.classes.iter() {
+                debug!("Validating parents of remaining eclass {:?}", eclass_id);
+                for parent in &eclass.parents {
+                    self.find(*parent);
                 }
             }
         }
