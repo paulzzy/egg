@@ -25,7 +25,7 @@ impl UnionFind {
     }
 
     fn parent_mut(&mut self, query: Id) -> Option<&mut Id> {
-        (&mut self.parents[usize::from(query)]).as_mut()
+        self.parents[usize::from(query)].as_mut()
     }
 
     pub fn find(&self, mut current: Id) -> Option<Id> {

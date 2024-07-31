@@ -183,7 +183,6 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// This allows the egraph to explain why two expressions are
     /// equivalent with the [`explain_equivalence`](EGraph::explain_equivalence) function.
     pub fn with_explanations_enabled(mut self) -> Self {
-        return self;
         if self.explain.is_some() {
             return self;
         }
