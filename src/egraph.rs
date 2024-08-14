@@ -1261,7 +1261,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     {
         let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
 
-        info!("Undoing {} rewrites", rewrites_to_undo.len(),);
+        info!("Undoing {} rewrites", rewrites_to_undo.len());
         debug!(
             "Rewrites to undo: {:?}",
             rewrites_to_undo
@@ -1298,6 +1298,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             .flat_map(|(applier_pat, search_matches)| {
                 zip(repeat(applier_pat), search_matches.substs)
             })
+            .skip(1)
             .filter_map(|(applier_pat, subst)| {
                 let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
 
