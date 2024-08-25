@@ -51,6 +51,7 @@ mod pattern;
 mod rewrite;
 mod run;
 mod subst;
+mod undo;
 mod unionfind;
 mod util;
 
@@ -102,6 +103,7 @@ pub use {
     rewrite::{Applier, Condition, ConditionEqual, ConditionalApplier, Rewrite, Searcher},
     run::*,
     subst::{Subst, Var},
+    undo::undo_rewrites,
     util::*,
 };
 
