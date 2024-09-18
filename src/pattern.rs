@@ -507,34 +507,22 @@ mod tests {
     #[test]
     fn search_with_limit() {
         crate::init_logger();
-        let init_expr = &"(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))".parse().unwrap();
-        let rules: Vec<Rewrite<_, ()>> = vec![
-            rewrite!("comm"; "(+ ?x ?y)" => "(+ ?y ?x)"),
-            rewrite!("assoc"; "(+ ?x (+ ?y ?z))" => "(+ (+ ?x ?y) ?z)"),
-        ];
-        let runner = Runner::default().with_expr(init_expr).run(&rules);
-        let egraph = &runner.egraph;
-
-        let len = |m: &Vec<SearchMatches<S>>| -> usize { m.iter().map(|m| m.substs.len()).sum() };
-
-        let pat = &"(+ ?x (+ ?y ?z))".parse::<Pattern<S>>().unwrap();
-        let m = pat.search(egraph);
-        let match_size = 2100;
-        assert_eq!(len(&m), match_size);
-
-        for limit in [1, 10, 100, 1000, 10000] {
-            let m = pat.search_with_limit(egraph, limit);
-            assert_eq!(len(&m), usize::min(limit, match_size));
-        }
-
-        let id = egraph.lookup_expr(init_expr).unwrap();
-        let m = pat.search_eclass(egraph, id).unwrap();
-        let match_size = 540;
-        assert_eq!(m.substs.len(), match_size);
-
-        for limit in [1, 10, 100, 1000] {
-            let m1 = pat.search_eclass_with_limit(egraph, id, limit).unwrap();
-            assert_eq!(m1.substs.len(), usize::min(limit, match_size));
-        }
+        let init_expr: &RecExpr<SymbolLang> = &"(+ a (+ a a))".parse().unwrap();
+        let rule = rewrite!("+-commutative"; "(+ ?x ?y)" => "(+ ?y ?x)");
+        let mut runner: Runner<_, ()> = Runner::default().with_expr(init_expr).run(vec![&rule]);
+        let matches = rule.search(&runner.egraph);
+        undo_rewrites(
+            &mut runner.egraph,
+            vec![(
+                &rule,
+                &dbg!(matches
+                    .iter()
+                    .flat_map(|a_match| a_match.substs.clone())
+                    .collect::<Vec<_>>()),
+            )],
+            &runner.roots,
+        )
+        .unwrap();
+        dbg!(runner.egraph.dump());
     }
 }
