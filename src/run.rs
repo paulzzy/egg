@@ -268,6 +268,7 @@ pub struct Report {
     pub search_time: f64,
     pub apply_time: f64,
     pub rebuild_time: f64,
+    pub undo_time: f64,
 }
 
 impl std::fmt::Display for Report {
@@ -283,6 +284,7 @@ impl std::fmt::Display for Report {
         writeln!(f, "    Search:  ({:.2}) {}", self.search_time / self.total_time, self.search_time)?;
         writeln!(f, "    Apply:   ({:.2}) {}", self.apply_time / self.total_time, self.apply_time)?;
         writeln!(f, "    Rebuild: ({:.2}) {}", self.rebuild_time / self.total_time, self.rebuild_time)?;
+        writeln!(f, "    Undo:    ({:.2}) {}", self.undo_time / self.total_time, self.undo_time)?;
         Ok(())
     }
 }
@@ -316,6 +318,8 @@ pub struct Iteration<IterData> {
     /// Seconds spent [`rebuild`](EGraph::rebuild())ing
     /// the egraph in this iteration.
     pub rebuild_time: f64,
+    /// Seconds spent [undoing rewrites](run::UndoScheduler) in this iteration.
+    pub undo_time: f64,
     /// Total time spent in this iteration, including data generation time.
     pub total_time: f64,
     /// The user provided annotation for this iteration
@@ -516,6 +520,7 @@ where
             search_time: self.iterations.iter().map(|i| i.search_time).sum(),
             apply_time: self.iterations.iter().map(|i| i.apply_time).sum(),
             rebuild_time: self.iterations.iter().map(|i| i.rebuild_time).sum(),
+            undo_time: self.iterations.iter().map(|i| i.undo_time).sum(),
             total_time: self.iterations.iter().map(|i| i.total_time).sum(),
         }
     }
@@ -603,6 +608,22 @@ where
             self.egraph.number_of_classes()
         );
 
+        let undo_time = Instant::now();
+
+        let pending_undos = self.scheduler.take_pending_undos();
+        if !pending_undos.is_empty() {
+            let egraph = &mut self.egraph;
+            let rewrites_with_substs = rules
+                .iter()
+                .filter(|rewrite| pending_undos.contains_key(&rewrite.name))
+                .map(|rewrite| (*rewrite, pending_undos.get(&rewrite.name).unwrap()))
+                .collect::<Vec<_>>();
+            undo_rewrites(egraph, rewrites_with_substs, &self.roots).unwrap();
+        }
+
+        let undo_time = undo_time.elapsed().as_secs_f64();
+        info!("Undo time: {undo_time}");
+
         let can_be_saturated = applied.is_empty()
             && self.scheduler.can_stop(i)
             // now make sure the hooks didn't do anything
@@ -625,6 +646,7 @@ where
             search_time,
             apply_time,
             rebuild_time,
+            undo_time,
             n_rebuilds,
             data: IterData::make(self),
             total_time: start_time.elapsed().as_secs_f64(),
@@ -761,6 +783,13 @@ where
         matches: Vec<SearchMatches<L>>,
     ) -> usize {
         rewrite.apply(egraph, &matches).len()
+    }
+
+    /// Rewrite matches that should be undone, referred to by their `Symbol` names. A `Runner`
+    /// instance will undo these rewrites immediately after rebuilding the e-graph. TODO: describe
+    /// why it's take
+    fn take_pending_undos(&mut self) -> HashMap<Symbol, Vec<Subst>> {
+        std::mem::take(&mut Default::default())
     }
 }
 
@@ -958,6 +987,124 @@ where
             stats.times_applied += 1;
             matches
         }
+    }
+}
+
+/// TODO: docs
+pub struct UndoScheduler {
+    default_match_limit: usize,
+    undo_stats: IndexMap<Symbol, UndoStats>,
+    pending_undo: HashMap<Symbol, Vec<Subst>>,
+}
+
+#[derive(Debug)]
+struct UndoStats {
+    times_applied: usize,
+    times_undone: usize,
+    match_limit: usize,
+    last_iteration_undone: usize,
+}
+
+impl UndoStats {
+    pub fn new(match_limit: usize) -> Self {
+        Self {
+            times_applied: 0,
+            times_undone: 0,
+            match_limit,
+            last_iteration_undone: 0,
+        }
+    }
+}
+
+impl Default for UndoScheduler {
+    fn default() -> Self {
+        Self {
+            default_match_limit: 1_000,
+            undo_stats: Default::default(),
+            pending_undo: Default::default(),
+        }
+    }
+}
+
+impl UndoScheduler {
+    /// Never undo a particular rule by setting its match limit to `usize::MAX`.
+    pub fn do_not_undo(&mut self, name: impl Into<Symbol>) -> &mut Self {
+        self.undo_stats
+            .entry(name.into())
+            .or_insert(UndoStats::new(self.default_match_limit))
+            .match_limit = usize::MAX;
+        self
+    }
+
+    /// Set the initial match limit for a rule.
+    pub fn rule_match_limit(&mut self, name: impl Into<Symbol>, limit: usize) -> &mut Self {
+        self.undo_stats
+            .entry(name.into())
+            .or_insert(UndoStats::new(limit))
+            .match_limit = limit;
+        self
+    }
+}
+
+impl<L, N> RewriteScheduler<L, N> for UndoScheduler
+where
+    L: Language,
+    N: Analysis<L>,
+{
+    fn search_rewrites<'a>(
+        &mut self,
+        iteration: usize,
+        egraph: &EGraph<L, N>,
+        rewrites: &[&'a Rewrite<L, N>],
+        limits: &RunnerLimits,
+    ) -> RunnerResult<Vec<Vec<SearchMatches<'a, L>>>> {
+        let mut all_matches = Vec::new();
+
+        for rw in rewrites {
+            let stats = self.undo_stats.entry(rw.name).or_insert(UndoStats {
+                times_applied: 0,
+                times_undone: 0,
+                match_limit: self.default_match_limit,
+                last_iteration_undone: 0,
+            });
+
+            let threshold = stats
+                .match_limit
+                .checked_shl(stats.times_undone as u32)
+                .unwrap();
+            let matches = rw.search_with_limit(egraph, threshold.saturating_add(1));
+            let total_len: usize = matches.iter().map(|m| m.substs.len()).sum();
+
+            if total_len > threshold {
+                info!("Pending rewrite undo: {} (applied {}, undone {}, last undone on {}): {threshold} < {total_len}",
+                    rw.name,
+                    stats.times_applied,
+                    stats.times_undone,
+                    stats.last_iteration_undone);
+
+                // Immediately undoing rewrites could result in a broken e-graph, since matches
+                // haven't yet been applied. Instead, these rewrites will be undone immediately
+                // after the e-graph is rebuilt.
+                stats.last_iteration_undone = iteration;
+                stats.times_undone += 1;
+                self.pending_undo.insert(
+                    rw.name,
+                    matches.into_iter().flat_map(|m| m.substs.clone()).collect(),
+                );
+                all_matches.push(vec![]);
+            } else {
+                stats.times_applied += 1;
+                all_matches.push(matches);
+            }
+
+            limits.check_limits(iteration, egraph)?;
+        }
+
+        Ok(all_matches)
+    }
+
+    fn take_pending_undos<'m>(&mut self) -> HashMap<Symbol, Vec<Subst>> {
+        std::mem::take(&mut self.pending_undo)
     }
 }
 
