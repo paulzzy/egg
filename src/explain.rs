@@ -82,7 +82,7 @@ pub struct Explain<L: Language> {
 
 pub(crate) struct ExplainNodes<'a, L: Language> {
     explain: &'a mut Explain<L>,
-    nodes: &'a [L],
+    nodes: &'a HashMap<Id, L>,
 }
 
 #[derive(Default)]
@@ -1047,7 +1047,7 @@ impl<L: Language> Explain<L> {
         equalities
     }
 
-    pub(crate) fn with_nodes<'a>(&'a mut self, nodes: &'a [L]) -> ExplainNodes<'a, L> {
+    pub(crate) fn with_nodes<'a>(&'a mut self, nodes: &'a HashMap<Id, L>) -> ExplainNodes<'a, L> {
         ExplainNodes {
             explain: self,
             nodes,
@@ -1071,7 +1071,7 @@ impl<'a, L: Language> DerefMut for ExplainNodes<'a, L> {
 
 impl<'x, L: Language> ExplainNodes<'x, L> {
     pub(crate) fn node(&self, node_id: Id) -> &L {
-        &self.nodes[usize::from(node_id)]
+        self.nodes.get(&node_id).unwrap()
     }
     fn node_to_explanation(
         &self,
@@ -1607,13 +1607,14 @@ impl<'x, L: Language> ExplainNodes<'x, L> {
         'outer: for eclass in classes.keys() {
             let enodes = self.find_all_enodes(*eclass);
             // find all congruence nodes
-            let mut cannon_enodes: HashMap<L, Vec<Id>> = Default::default();
+            let mut canonical_enodes: HashMap<L, Vec<Id>> = Default::default();
             for enode in &enodes {
-                let cannon = self
-                    .node(*enode)
-                    .clone()
-                    .map_children(|child| unionfind.find(child));
-                if let Some(others) = cannon_enodes.get_mut(&cannon) {
+                let canonical = self.node(*enode).clone().map_children(|child| {
+                    unionfind
+                        .find(child)
+                        .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", child))
+                });
+                if let Some(others) = canonical_enodes.get_mut(&canonical) {
                     for other in others.iter() {
                         congruence_neighbors[usize::from(*enode)].push(*other);
                         congruence_neighbors[usize::from(*other)].push(*enode);
@@ -1622,7 +1623,7 @@ impl<'x, L: Language> ExplainNodes<'x, L> {
                     others.push(*enode);
                 } else {
                     counter += 1;
-                    cannon_enodes.insert(cannon, vec![*enode]);
+                    canonical_enodes.insert(canonical, vec![*enode]);
                 }
                 // Don't find every congruence edge because that could be n^2 edges
                 if counter > CONGRUENCE_LIMIT * self.explainfind.len() {
@@ -1830,14 +1831,22 @@ impl<'x, L: Language> ExplainNodes<'x, L> {
                 common_ancestor,
             );
             unionfind.union(enode, *child);
-            ancestor[usize::from(unionfind.find(enode))] = enode;
+            ancestor[usize::from(
+                unionfind
+                    .find(enode)
+                    .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", child)),
+            )] = enode;
         }
 
         if common_ancestor_queries.get(&enode).is_some() {
             black_set.insert(enode);
             for other in common_ancestor_queries.get(&enode).unwrap() {
                 if black_set.contains(other) {
-                    let ancestor = ancestor[usize::from(unionfind.find(*other))];
+                    let ancestor = ancestor[usize::from(
+                        unionfind
+                            .find(*other)
+                            .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", other)),
+                    )];
                     common_ancestor.insert((enode, *other), ancestor);
                     common_ancestor.insert((*other, enode), ancestor);
                 }

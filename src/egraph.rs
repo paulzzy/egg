@@ -2,6 +2,7 @@ use crate::*;
 use std::{
     borrow::BorrowMut,
     fmt::{self, Debug, Display},
+    iter::{repeat, zip},
     marker::PhantomData,
 };
 
@@ -57,7 +58,7 @@ pub struct EGraph<L: Language, N: Analysis<L>> {
     pub(crate) explain: Option<Explain<L>>,
     unionfind: UnionFind,
     /// Stores the original node represented by each non-canonical id
-    nodes: Vec<L>,
+    nodes: HashMap<Id, L>,
     /// Stores each enode's `Id`, not the `Id` of the eclass.
     /// Enodes in the memo are canonicalized at each rebuild, but after rebuilding new
     /// unions can cause them to become out of date.
@@ -220,7 +221,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             panic!("Use runner.with_explanations_enabled() or egraph.with_explanations_enabled() before running to get a copied egraph without unions");
         }
         let mut egraph = Self::new(analysis);
-        for node in &self.nodes {
+        for (_, node) in &self.nodes {
             egraph.add(node.clone());
         }
         egraph
@@ -369,7 +370,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
     /// Like [`id_to_expr`](EGraph::id_to_expr) but only goes one layer deep
     pub fn id_to_node(&self, id: Id) -> &L {
-        &self.nodes[usize::from(id)]
+        self.nodes.get(&id).unwrap()
     }
 
     /// Like [`id_to_expr`](EGraph::id_to_expr), but creates a pattern instead of a term.
@@ -576,13 +577,17 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
     /// assert_eq!(egraph.find(x), egraph.find(y));
     /// ```
     pub fn find(&self, id: Id) -> Id {
-        self.unionfind.find(id)
+        self.unionfind
+            .find(id)
+            .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
     }
 
     /// This is private, but internals should use this whenever
     /// possible because it does path compression.
     fn find_mut(&mut self, id: Id) -> Id {
-        self.unionfind.find_mut(id)
+        self.unionfind
+            .find_mut(id)
+            .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
     }
 
     /// Creates a [`Dot`] to visualize this egraph. See [`Dot`].
@@ -652,8 +657,8 @@ where
             nodes: src_egraph
                 .nodes
                 .into_iter()
-                .map(|x| self.map_node(x))
-                .collect(),
+                .map(|(id, enode)| (id, self.map_node(enode)))
+                .collect::<HashMap<_, _>>(),
             analysis_pending: src_egraph.analysis_pending,
             classes: src_egraph
                 .classes
@@ -1047,8 +1052,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
                 } else {
                     let new_id = self.unionfind.make_set();
                     explain.add(original.clone(), new_id, new_id);
-                    debug_assert_eq!(Id::from(self.nodes.len()), new_id);
-                    self.nodes.push(original);
+                    self.nodes.insert(new_id, original);
                     self.unionfind.union(id, new_id);
                     explain.union(existing_id, new_id, Justification::Congruence, true);
                     new_id
@@ -1080,8 +1084,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             parents: Default::default(),
         };
 
-        debug_assert_eq!(Id::from(self.nodes.len()), id);
-        self.nodes.push(original);
+        self.nodes.insert(id, enode.clone());
 
         // add this enode to the parent lists of its children
         enode.for_each(|child| {
@@ -1240,6 +1243,310 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         true
     }
 
+    /// Inverse equality saturation.
+    ///
+    /// Removes RHS instances of the input rewrites, but will not remove enodes
+    /// belonging to the original egraph (before rewriting).
+    ///
+    /// TODO: Example
+    pub fn undo_rewrites<'a, R>(
+        &mut self,
+        rewrites_to_undo: R,
+        roots: &[Id],
+        original_enodes: &HashSet<L>,
+    ) where
+        R: IntoIterator<Item = &'a Rewrite<L, N>>,
+        L: 'a,
+        N: 'a,
+    {
+        let rewrites_to_undo: Vec<_> = rewrites_to_undo.into_iter().collect();
+
+        info!("Undoing {} rewrites", rewrites_to_undo.len());
+        debug!(
+            "Rewrites to undo: {:?}",
+            rewrites_to_undo
+                .iter()
+                .map(|rewrite| rewrite.name)
+                .collect::<Vec<_>>()
+        );
+
+        let patterns_and_matches: Vec<(Pattern<L>, Vec<SearchMatches<L>>)> = zip(
+            rewrites_to_undo.iter().map(|rewrite| {
+                Pattern::from(
+                    rewrite
+                        .applier
+                        .get_pattern_ast()
+                        .expect("Applier (RHS) of rewrite rule should be a pattern")
+                        .clone(),
+                )
+            }),
+            rewrites_to_undo.iter().map(|rewrite| rewrite.search(self)),
+        )
+        .collect();
+
+        if patterns_and_matches.is_empty() {
+            // TODO: If no matches should I return `Option::None`? Not sure how
+            // the API for this should work.
+            return;
+        }
+
+        let applier_enode_ids: HashSet<Id> = patterns_and_matches
+            .into_iter()
+            .flat_map(|(applier_pat, all_search_matches)| {
+                zip(repeat(applier_pat), all_search_matches)
+            })
+            .flat_map(|(applier_pat, search_matches)| {
+                zip(repeat(applier_pat), search_matches.substs)
+            })
+            .skip(1)
+            .filter_map(|(applier_pat, subst)| {
+                let applier_enode_id = self.find_enode_id(applier_pat.ast.as_ref(), &subst)?;
+
+                let canonicalized_enode = self
+                    .id_to_node(*applier_enode_id)
+                    .clone()
+                    .map_children(|child| self.find(child));
+
+                // Always preserve the original enodes. Does not compare by ID
+                // since an enode may have multiple IDs (at least in
+                // `self.nodes`).
+                //
+                // TODO: Is there a way to use IDs? Or a way this would have
+                // false negatives?
+                if original_enodes.contains(&canonicalized_enode) {
+                    debug!(
+                        "Skip marking {:?} for removal since it's in the original egraph",
+                        canonicalized_enode
+                    );
+                    return None;
+                }
+
+                Some(*applier_enode_id)
+            })
+            .collect();
+
+        self.remove_enodes(applier_enode_ids, roots);
+    }
+
+    /// Find the e-node ID given a pattern and a substitution.
+    ///
+    /// # Example: TODO not actually done yet
+    /// ```ignore
+    /// use egg::*;
+    /// let egraph = EGraph::<SymbolLang, ()>::default();
+    /// let enode_id = egraph.find_enode_id(pattern_ast, subst);
+    /// let enode = egraph.id_to_node(enode_id);
+    /// ```
+    fn find_enode_id(&self, pattern: &[ENodeOrVar<L>], subst: &Subst) -> Option<&Id> {
+        // Pretty sure this is required since finding an instantiated enode
+        // relies on the egraph's enodes having canonicalized children
+        // TODO: Better explanation
+        assert!(
+            self.clean,
+            "Cannot remove enodes without a clean egraph, try rebuilding"
+        );
+
+        let mut id_buf: Vec<Id> = vec![0.into(); pattern.len()];
+        let mut candidate: Option<&Id> = None;
+        for (i, enode_or_var) in pattern.iter().enumerate() {
+            let id = match enode_or_var {
+                ENodeOrVar::Var(var) => *subst.get(*var)?,
+                ENodeOrVar::ENode(enode) => {
+                    let instantiated_enode = enode
+                        .clone()
+                        .map_children(|child| id_buf[usize::from(child)]);
+                    candidate = self.memo.get(&instantiated_enode);
+                    self.lookup(instantiated_enode)?
+                }
+            };
+            id_buf[i] = id;
+        }
+        candidate
+    }
+
+    /// Removes specified enodes (except when it would leave dangling children)
+    /// and cleans up the resulting egraph, in particular by removing
+    /// unreachable eclasses and enodes.
+    ///
+    /// For an enode that has parents (which aren't being removed) and is the
+    /// only member of its eclass, removing it when leave a dangling child. In
+    /// this case, the enode is not removed.
+    fn remove_enodes(&mut self, enode_ids: HashSet<Id>, roots: &[Id]) {
+        // Pretty sure this is required since e.g. rebuilding dedups enodes in
+        // eclasses, `remove_enodes` can't handle duplicate enodes
+        // TODO: Better explanation
+        assert!(
+            self.clean,
+            "cannot remove enodes without a clean egraph, try rebuilding"
+        );
+
+        if enode_ids.is_empty() {
+            return;
+        }
+
+        debug!(
+            "Enodes which may be removed (with uncanonical children): {:?}",
+            enode_ids
+                .iter()
+                .map(|id| self.id_to_node(*id))
+                .collect::<Vec<_>>()
+        );
+        trace!("EGraph before removing enodes:\n{:?}", self.dump());
+
+        let num_enodes = self.nodes.len();
+        let num_eclasses = self.classes.len();
+
+        // Remove the input enodes from their corresponding eclasses
+        'enode_removal: for enode_id in &enode_ids {
+            // Canonicalize enode's children so it can be found in
+            // `eclass.nodes`
+            let enode_to_remove = self
+                .id_to_node(*enode_id)
+                .clone()
+                .map_children(|child| self.find_mut(child));
+            let eclass_id = &self.find_mut(*enode_id);
+
+            // Skip if eclass is a singleton and has parents
+            //
+            // TODO: Might be skipping removals that are valid?
+            let eclass = self.classes.get(eclass_id).unwrap();
+            if eclass.nodes.len() == 1 && !eclass.parents.is_empty() {
+                info!(
+                    "Skipping removal of {:?} to avoid becoming a dangling child",
+                    &enode_to_remove
+                );
+                continue 'enode_removal;
+            }
+
+            trace!(
+                "Removing enode {:?} with id {:?}",
+                self.id_to_node(*enode_id),
+                enode_id
+            );
+
+            // TODO: Shadowing shenanigans to avoid angering the borrow checker
+            let eclass = self.classes.get_mut(eclass_id).unwrap();
+            eclass
+                .nodes
+                .remove(
+                    eclass
+                        .nodes
+                        .binary_search(&enode_to_remove)
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "Enode to remove ({:?}) not found in eclass: {:?}\nMost likely the result of external code removing enodes from the egraph",
+                                enode_to_remove, eclass
+                            )
+                        }),
+                );
+
+            // Remove enode from parent arrays of children eclasses
+            for eclass_id in enode_to_remove.children() {
+                let eclass = self.classes.get_mut(eclass_id).unwrap();
+                eclass.parents.swap_remove(
+                    eclass
+                        .parents
+                        .iter()
+                        .position(|parent_id| parent_id == enode_id)
+                        .expect("enode should be in parents array of its children eclasses"),
+                );
+            }
+        }
+
+        self.remove_unreachable(roots);
+
+        info!(
+            "Removed {} enodes ({} remaining) and {} eclasses ({} remaining)",
+            num_enodes - self.nodes.len(),
+            self.nodes.len(),
+            num_eclasses - self.classes.len(),
+            self.classes.len()
+        );
+    }
+
+    fn remove_unreachable(&mut self, roots: &[Id]) {
+        // Canonicalize roots' children
+        let roots: Vec<Id> = roots.iter().map(|id| self.find_mut(*id)).collect();
+
+        let mut visited_eclasses = HashSet::<Id>::default();
+        let mut visited_enodes = HashSet::<Id>::default();
+
+        let mut dfs_stack: Vec<&L> = roots
+            .iter()
+            .flat_map(|id| match self.classes.get(id) {
+                Some(eclass) => eclass.nodes.iter(),
+                None => [].iter(),
+            })
+            .collect();
+
+        // Traverse egraph from roots to leaves, marking visited eclasses and enodes
+        while let Some(enode) = dfs_stack.pop() {
+            let enode_id = *self.memo.get(enode).unwrap();
+            let eclass_id = self.find(enode_id);
+
+            visited_eclasses.insert(eclass_id);
+            visited_enodes.insert(enode_id);
+
+            let children_enodes: Vec<&L> = enode
+                .children()
+                .iter()
+                // Avoid following cycles
+                .filter(|child| !visited_eclasses.contains(child))
+                .flat_map(|child| self.classes.get(child).unwrap().iter())
+                .collect();
+            dfs_stack.extend(children_enodes);
+        }
+
+        // Remove unreachable enodes
+        self.memo
+            .retain(|_, enode_id| visited_enodes.contains(enode_id));
+        self.nodes
+            .retain(|enode_id, _| visited_enodes.contains(enode_id));
+
+        // Clean up eclasses
+        for eclass_id in self.classes.keys().copied().collect::<Vec<_>>() {
+            if visited_eclasses.contains(&eclass_id) {
+                // Remove unreachable parents
+                let eclass = self.classes.get_mut(&eclass_id).unwrap();
+                eclass
+                    .parents
+                    .retain(|parent_id| visited_enodes.contains(parent_id));
+            } else {
+                // Remove unreachable eclasses
+                self.unionfind.delete(eclass_id);
+                self.classes.remove(&eclass_id);
+                self.classes_by_op.values_mut().for_each(|op| {
+                    op.remove(&eclass_id);
+                });
+            }
+        }
+
+        trace!("EGraph after removing enodes:\n{:?}", self.dump());
+
+        #[cfg(debug_assertions)]
+        {
+            // Check for existence of remaining enodes' children
+            for (enode_id, enode) in self.nodes.iter() {
+                debug!(
+                    "Validating children of remaining enode {:?} with id {:?}",
+                    enode, enode_id
+                );
+                for child in enode.children() {
+                    trace!("Looking for child {:?}", child);
+                    self.find(*child);
+                }
+            }
+
+            // Check for existence of remaining eclasses' parents
+            for (eclass_id, eclass) in self.classes.iter() {
+                debug!("Validating parents of remaining eclass {:?}", eclass_id);
+                for parent in &eclass.parents {
+                    self.find(*parent);
+                }
+            }
+        }
+    }
+
     /// Update the analysis data of an e-class.
     ///
     /// This also propagates the changes through the e-graph,
@@ -1305,10 +1612,12 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
 
         for class in self.classes.values_mut() {
             let old_len = class.len();
-            class
-                .nodes
-                .iter_mut()
-                .for_each(|n| n.update_children(|id| uf.find_mut(id)));
+            class.nodes.iter_mut().for_each(|n| {
+                n.update_children(|id| {
+                    uf.find_mut(id)
+                        .unwrap_or_else(|| panic!("eclass id {:?} not in egraph", id))
+                })
+            });
             class.nodes.sort_unstable();
             class.nodes.dedup();
 
@@ -1384,13 +1693,13 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         let mut n_unions = 0;
 
         while !self.pending.is_empty() || !self.analysis_pending.is_empty() {
-            while let Some(class) = self.pending.pop() {
-                let mut node = self.nodes[usize::from(class)].clone();
+            while let Some(class_id) = self.pending.pop() {
+                let mut node = self.nodes.get(&class_id).unwrap().clone();
                 node.update_children(|id| self.find_mut(id));
-                if let Some(memo_class) = self.memo.insert(node, class) {
+                if let Some(memo_class) = self.memo.insert(node, class_id) {
                     let did_something = self.perform_union(
                         memo_class,
-                        class,
+                        class_id,
                         Some(Justification::Congruence),
                         false,
                     );
@@ -1399,7 +1708,7 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
             }
 
             while let Some(class_id) = self.analysis_pending.pop() {
-                let node = self.nodes[usize::from(class_id)].clone();
+                let node = self.nodes.get(&class_id).unwrap().clone();
                 let class_id = self.find_mut(class_id);
                 let node_data = N::make(self, &node);
                 let class = self.classes.get_mut(&class_id).unwrap();

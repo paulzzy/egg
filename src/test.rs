@@ -171,7 +171,6 @@ where
     );
 
     let mut runner = Runner::default()
-        .with_scheduler(SimpleScheduler)
         .with_hook(move |runner| {
             let n_nodes = runner.egraph.total_number_of_nodes();
             eprintln!("Iter {}, {} nodes", runner.iterations.len(), n_nodes);
@@ -184,6 +183,16 @@ where
         .with_iter_limit(iter_limit)
         .with_node_limit(node_limit)
         .with_time_limit(Duration::from_secs(time_limit));
+
+    let original_enodes = runner
+        .egraph
+        .classes()
+        .flat_map(|eclass| eclass.nodes.clone())
+        .collect::<HashSet<_>>();
+
+    let inverse_scheduler = InverseScheduler::new(1000, runner.roots.clone(), original_enodes);
+
+    let mut runner = runner.with_scheduler(SimpleScheduler);
 
     for expr in exprs {
         runner = runner.with_expr(&expr.parse().unwrap());

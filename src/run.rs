@@ -412,6 +412,7 @@ where
         let rules: Vec<&Rewrite<L, N>> = rules.into_iter().collect();
         check_rules(&rules);
         self.egraph.rebuild();
+
         loop {
             let iter = self.run_one(&rules);
             self.iterations.push(iter);
@@ -540,7 +541,7 @@ where
         let mut applied = IndexMap::default();
         result = result.and_then(|_| {
             rules.iter().try_for_each(|rw| {
-                let ms = self.scheduler.search_rewrite(i, &self.egraph, rw);
+                let ms = self.scheduler.search_rewrite(i, &mut self.egraph, rw);
                 matches.push(ms);
                 self.check_limits()
             })
@@ -686,7 +687,7 @@ where
     fn search_rewrite<'a>(
         &mut self,
         iteration: usize,
-        egraph: &EGraph<L, N>,
+        egraph: &mut EGraph<L, N>,
         rewrite: &'a Rewrite<L, N>,
     ) -> Vec<SearchMatches<'a, L>> {
         rewrite.search(egraph)
@@ -866,7 +867,7 @@ where
     fn search_rewrite<'a>(
         &mut self,
         iteration: usize,
-        egraph: &EGraph<L, N>,
+        egraph: &mut EGraph<L, N>,
         rewrite: &'a Rewrite<L, N>,
     ) -> Vec<SearchMatches<'a, L>> {
         let stats = self.rule_stats(rewrite.name);
@@ -898,6 +899,106 @@ where
                 threshold,
                 total_len,
             );
+            vec![]
+        } else {
+            stats.times_applied += 1;
+            matches
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UndoStats {
+    times_applied: usize,
+    times_undone: usize,
+    match_limit: usize,
+}
+
+/// TODO: docs
+pub struct InverseScheduler<L: Language> {
+    default_match_limit: usize,
+    stats: IndexMap<Symbol, UndoStats>,
+    roots: Vec<Id>,
+    original_enodes: HashSet<L>,
+}
+
+impl<L: Language> InverseScheduler<L> {
+    /// TODO: docs
+    pub fn new<T>(default_match_limit: usize, roots: T, original_enodes: HashSet<L>) -> Self
+    where
+        T: IntoIterator<Item = Id>,
+    {
+        Self {
+            default_match_limit,
+            stats: Default::default(),
+            roots: roots.into_iter().collect(),
+            original_enodes,
+        }
+    }
+
+    /// Set the initial match limit after which a rule will be undone.
+    /// Default: 1,000
+    pub fn with_initial_match_limit(mut self, limit: usize) -> Self {
+        self.default_match_limit = limit;
+        self
+    }
+
+    fn rule_stats(&mut self, name: Symbol) -> &mut UndoStats {
+        if self.stats.contains_key(&name) {
+            &mut self.stats[&name]
+        } else {
+            self.stats.entry(name).or_insert(UndoStats {
+                times_applied: 0,
+                times_undone: 0,
+                match_limit: self.default_match_limit,
+            })
+        }
+    }
+
+    /// Never undo a particular rule.
+    pub fn do_not_undo(mut self, name: impl Into<Symbol>) -> Self {
+        self.rule_stats(name.into()).match_limit = usize::MAX;
+        self
+    }
+
+    /// Set the initial match limit for a rule.
+    pub fn rule_match_limit(mut self, name: impl Into<Symbol>, limit: usize) -> Self {
+        self.rule_stats(name.into()).match_limit = limit;
+        self
+    }
+}
+
+impl<L, N> RewriteScheduler<L, N> for InverseScheduler<L>
+where
+    L: Language,
+    N: Analysis<L>,
+{
+    fn can_stop(&mut self, _iteration: usize) -> bool {
+        // TODO: Reapply rules that were undone "too many times"? How to define that?
+        true
+    }
+
+    fn search_rewrite<'a>(
+        &mut self,
+        _iteration: usize,
+        egraph: &mut EGraph<L, N>,
+        rewrite: &'a Rewrite<L, N>,
+    ) -> Vec<SearchMatches<'a, L>> {
+        let stats = self.rule_stats(rewrite.name);
+
+        let threshold = stats
+            .match_limit
+            .checked_shl(stats.times_undone as u32)
+            .unwrap();
+        let matches = rewrite.search_with_limit(egraph, threshold.saturating_add(1));
+        let total_len: usize = matches.iter().map(|m| m.substs.len()).sum();
+        if total_len > threshold {
+            stats.times_undone += 1;
+            info!(
+                "Undoing {} (applied {}, undone{})",
+                rewrite.name, stats.times_applied, stats.times_undone,
+            );
+            egraph.undo_rewrites([rewrite], self.roots.as_slice(), &self.original_enodes);
             vec![]
         } else {
             stats.times_applied += 1;
