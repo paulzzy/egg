@@ -4,9 +4,8 @@ use std::{
 };
 
 use log::{debug, info, trace};
-use symbol_table::GlobalSymbol;
 
-use crate::{Analysis, AstSize, EClass, EGraph, ENodeOrVar, Id, Instant, Language, Rewrite, Subst};
+use crate::{Analysis, EClass, EGraph, ENodeOrVar, Id, Instant, Language, Rewrite, Subst};
 
 /// TODO: good docs and an example
 ///
@@ -21,13 +20,6 @@ pub fn undo_rewrites<'a, L: Language + 'a, N: Analysis<L> + 'a>(
         todo!("Undoing rewrites with explanations enabled is not supported");
     }
 
-    // let allowed_rewrites: [GlobalSymbol; 1] = ["associate-*r*".into()];
-
-    // let rewrites_with_substs = rewrites_with_substs
-    //     .into_iter()
-    //     .filter(|(rewrite, _)| allowed_rewrites.contains(&rewrite.name))
-    //     .collect::<Vec<_>>();
-
     info!("Undoing rewrites with roots {roots:?}");
 
     trace!("E-Graph before undoing: {:?}", egraph.dump());
@@ -41,19 +33,6 @@ pub fn undo_rewrites<'a, L: Language + 'a, N: Analysis<L> + 'a>(
             .get_pattern_ast()
             .expect("applier must support `get_pattern_ast`, such as `Pattern`");
 
-        // if pattern_ast.len()
-        //     == rewrite
-        //         .searcher
-        //         .get_pattern_ast()
-        //         .expect("searcher must support `get_pattern_ast`, such as `Pattern`")
-        //         .len()
-        // {
-        //     // Avoid undoing rewrites where the RHS is contained in the LHS, because it may result
-        //     // in a term with no leaf e-nodes (so the term never "terminates")
-        //     log::warn!("Skip undoing rewrite {} because the RHS is shorter than and may be contained in the LHS", rewrite.name);
-        //     continue;
-        // }
-
         info!("Undoing rewrite {}", rewrite.name);
         let undo_rewrite_time = Instant::now();
 
@@ -62,17 +41,6 @@ pub fn undo_rewrites<'a, L: Language + 'a, N: Analysis<L> + 'a>(
         for subst in all_substs.iter().skip(1) {
             let removed = remove_top_enode(egraph, pattern_ast.as_ref(), subst)?;
             enode_counter += removed as u32;
-
-            if removed {
-                {
-                    // Check that all roots have at least one ground term (i.e. have a best e-class)
-                    for root in roots {
-                        info!("checking root {:?}", root);
-                        use crate::Extractor;
-                        let _ = Extractor::new(egraph, AstSize).find_best(*root);
-                    }
-                }
-            }
         }
 
         info!(
