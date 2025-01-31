@@ -40,6 +40,7 @@ pub fn test_runner<L, A>(
 {
     let _ = env_logger::builder().is_test(true).try_init();
     let mut runner = runner.unwrap_or_default();
+    runner = runner.with_scheduler(UndoScheduler::default());
 
     if let Some(lim) = env_var("EGG_NODE_LIMIT") {
         runner = runner.with_node_limit(lim)
