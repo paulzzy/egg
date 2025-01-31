@@ -77,7 +77,7 @@ pub struct EGraph<L: Language, N: Analysis<L>> {
     pub(crate) classes: HashMap<Id, EClass<L, N::Data>>,
     #[cfg_attr(feature = "serde-1", serde(skip))]
     #[cfg_attr(feature = "serde-1", serde(default = "default_classes_by_op"))]
-    classes_by_op: HashMap<L::Discriminant, HashSet<Id>>,
+    pub(crate) classes_by_op: HashMap<L::Discriminant, HashSet<Id>>,
     /// Whether or not reading operation are allowed on this e-graph.
     /// Mutating operations will set this to `false`, and
     /// [`EGraph::rebuild`] will set it to true.
